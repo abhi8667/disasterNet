@@ -1,8 +1,19 @@
 export interface SOSPacket {
-  id: string; // Unique ID
-  sender: string; // Node ID
-  severity: number; // 1-10
+  id: string;
+  sender: string;
+  severity: number;
   timestamp: number;
-  path: string[]; // Track hop history for visualization
-  payload: string; // The SOS message
+  path: string[];
+  payload: string;
+  synced: boolean;
+  metadata: {
+    medicalUrgency: number;
+    peopleAffected: number;
+    waitStartTime: number;
+    locationDifficulty: number;
+  };
+  location: {
+    lat: number;
+    lng: number;
+  };
 }

@@ -2,12 +2,20 @@ import React, { createContext, useContext, useEffect, useState, useRef } from 'r
 import { io, Socket } from 'socket.io-client';
 import { v4 as uuidv4 } from 'uuid';
 import { SOSPacket } from '../types';
+import { saveSOS, getAllSOS, initDB, resetLocalDatabase } from '../db';
+import { syncToStellar } from '../blockchain';
 
 interface MeshContextType {
   nodeId: string;
   connected: boolean;
+  isGateway: boolean;
+  forceOffline: boolean;
+  setForceOffline: (val: boolean) => void;
   packets: SOSPacket[];
-  broadcastSOS: (payload: string, severity: number) => void;
+  broadcastSOS: (payload: string, severity: number, metadata: SOSPacket['metadata'], location: SOSPacket['location']) => void;
+  triggerSync: () => Promise<void>;
+  blockchainLogs: { id: string; hash: string; timestamp: number }[];
+  hardReset: () => void;
 }
 
 const MeshContext = createContext<MeshContextType | undefined>(undefined);
@@ -16,83 +24,102 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [socket, setSocket] = useState<Socket | null>(null);
   const [nodeId, setNodeId] = useState<string>('');
   const [connected, setConnected] = useState(false);
+  const [isGateway, setIsGateway] = useState(false);
+  const [forceOffline, setForceOffline] = useState(false);
   const [packets, setPackets] = useState<SOSPacket[]>([]);
-  
-  // Use a ref for receivedIds to prevent stale closures in socket event handlers
+  const [blockchainLogs, setBlockchainLogs] = useState<{ id: string; hash: string; timestamp: number }[]>([]);
   const receivedIds = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    // For the hackathon, we use socket.io to emulate radio/mesh transmission
-    const newSocket = io('http://localhost:3001');
-    setSocket(newSocket);
-
-    newSocket.on('connect', () => {
-      setConnected(true);
-      // In a real mesh, we'd use device MAC or a generated UUID. Here we just use socket id for simplicity.
-      setNodeId(newSocket.id || uuidv4().substring(0, 8));
-    });
-
-    newSocket.on('disconnect', () => {
-      setConnected(false);
-    });
-
-    newSocket.on('mesh_receive', (packet: SOSPacket) => {
-      // THE GOSSIP PROTOCOL LOGIC: Check if we've already seen this packet
-      if (receivedIds.current.has(packet.id)) {
-        console.log(`[Mesh] Dropping duplicate packet: ${packet.id}`);
-        return;
-      }
-
-      console.log(`[Mesh] Received NEW packet: ${packet.id}`);
-      
-      // 1. Add to received list
-      receivedIds.current.add(packet.id);
-      
-      // 2. Add ourselves to the hop path
-      const updatedPacket = {
-        ...packet,
-        path: [...packet.path, newSocket.id || 'unknown']
-      };
-
-      // 3. Store locally for UI
-      setPackets((prev) => [updatedPacket, ...prev]);
-
-      // 4. Relay (Broadcast) to neighbors
-      // Emulate standard mesh behavior where a node blindly relays to others
-      console.log(`[Mesh] Relaying packet: ${updatedPacket.id}`);
-      newSocket.emit('mesh_broadcast', updatedPacket);
-    });
-
-    return () => {
-      newSocket.close();
+    const checkOnline = () => {
+      setIsGateway(navigator.onLine && !forceOffline);
     };
+    window.addEventListener('online', checkOnline);
+    window.addEventListener('offline', checkOnline);
+    checkOnline();
+    return () => {
+      window.removeEventListener('online', checkOnline);
+      window.removeEventListener('offline', checkOnline);
+    };
+  }, [forceOffline]);
+
+  useEffect(() => {
+    const hydrate = async () => {
+      const savedPackets = await getAllSOS();
+      if (savedPackets.length > 0) {
+        setPackets(savedPackets.sort((a, b) => b.timestamp - a.timestamp));
+        savedPackets.forEach(p => receivedIds.current.add(p.id));
+      }
+    };
+    hydrate();
   }, []);
 
-  const broadcastSOS = (payload: string, severity: number) => {
-    if (!socket || !nodeId) return;
+  const triggerSync = async () => {
+    if (!isGateway) return;
+    const db = await initDB();
+    const allMessages = await db.getAll('messages');
+    const unsynced = allMessages.filter(m => !m.synced);
 
-    const newPacket: SOSPacket = {
-      id: uuidv4(),
-      sender: nodeId,
-      severity,
-      timestamp: Date.now(),
-      path: [nodeId],
-      payload,
-    };
+    if (unsynced.length > 0) {
+      try {
+        const txHash = await syncToStellar(unsynced);
+        const tx = db.transaction('messages', 'readwrite');
+        for (const msg of unsynced) {
+          msg.synced = true;
+          tx.store.put(msg);
+        }
+        await tx.done;
+        setBlockchainLogs(prev => [{ id: uuidv4(), hash: txHash, timestamp: Date.now() }, ...prev]);
+        const updatedAll = await db.getAll('messages');
+        setPackets(updatedAll.sort((a, b) => b.timestamp - a.timestamp));
+        console.log(`[BLOCKCHAIN] Transaction Anchored: ${txHash}`);
+      } catch (err) {
+        console.error("[BLOCKCHAIN] Sync Failure.");
+      }
+    }
+  };
 
-    // Store our own packet so we don't process it if it bounces back
-    receivedIds.current.add(newPacket.id);
+  const hardReset = async () => {
+    await resetLocalDatabase();
+    setPackets([]);
+    setBlockchainLogs([]);
+    receivedIds.current.clear();
+    window.location.reload();
+  };
+
+  useEffect(() => {
+    // FIX: Detect the IP of the main PC automatically so Laptop B can connect
+    const backendUrl = `http://${window.location.hostname}:3001`;
+    const newSocket = io(backendUrl);
     
-    // Add to local state
-    setPackets((prev) => [newPacket, ...prev]);
+    setSocket(newSocket);
+    newSocket.on('connect', () => {
+      setConnected(true);
+      setNodeId(newSocket.id || uuidv4().substring(0, 8));
+      console.log(`[SYSTEM] Mesh Node Connected to ${backendUrl}`);
+    });
+    newSocket.on('mesh_receive', async (packet: SOSPacket) => {
+      if (receivedIds.current.has(packet.id)) return;
+      receivedIds.current.add(packet.id);
+      await saveSOS(packet);
+      const updatedPacket = { ...packet, path: [...packet.path, newSocket.id || 'unknown'] };
+      setPackets((prev) => [updatedPacket, ...prev]);
+      newSocket.emit('mesh_broadcast', updatedPacket);
+    });
+    return () => { newSocket.close(); };
+  }, []);
 
-    // Send it over the "air"
-    console.log(`[Mesh] Originating broadcast: ${newPacket.id}`);
+  const broadcastSOS = async (payload: string, severity: number, metadata: SOSPacket['metadata'], location: SOSPacket['location']) => {
+    if (!socket || !nodeId) return;
+    const newPacket: SOSPacket = { id: uuidv4(), sender: nodeId, severity, timestamp: Date.now(), path: [nodeId], payload, synced: false, metadata, location };
+    receivedIds.current.add(newPacket.id);
+    await saveSOS(newPacket);
+    setPackets((prev) => [newPacket, ...prev]);
     socket.emit('mesh_broadcast', newPacket);
   };
 
   return (
-    <MeshContext.Provider value={{ nodeId, connected, packets, broadcastSOS }}>
+    <MeshContext.Provider value={{ nodeId, connected, isGateway, forceOffline, setForceOffline, packets, broadcastSOS, triggerSync, blockchainLogs, hardReset }}>
       {children}
     </MeshContext.Provider>
   );
@@ -100,8 +127,6 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
 export const useMesh = () => {
   const context = useContext(MeshContext);
-  if (context === undefined) {
-    throw new Error('useMesh must be used within a MeshProvider');
-  }
+  if (context === undefined) throw new Error('useMesh must be used within a MeshProvider');
   return context;
 };
