@@ -23,12 +23,16 @@ export const saveSOS = async (packet: any) => {
   });
 };
 
+export const deleteSOS = async (id: string) => {
+  const db = await initDB();
+  await db.delete(STORE_NAME, id);
+};
+
 export const getAllSOS = async () => {
   const db = await initDB();
   return await db.getAll(STORE_NAME);
 };
 
-// NEW: Hard Reset utility for the Demo Stress Test
 export const resetLocalDatabase = async () => {
   await deleteDB(DB_NAME);
   console.log("[SYSTEM] Local Database Wiped.");

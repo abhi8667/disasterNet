@@ -16,4 +16,11 @@ export interface SOSPacket {
     lat: number;
     lng: number;
   };
+  // New: Field to store responder's feedback/status
+  response?: {
+    responderId: string;
+    status: 'DISPATCHED' | 'RESCUED' | 'PENDING';
+    notes: string;
+    timestamp: number;
+  };
 }

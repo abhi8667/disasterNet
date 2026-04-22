@@ -1,23 +1,46 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useMesh } from './context/MeshContext';
-import { calculatePriorityScore } from './ai/fairnessEngine';
-import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Cell, Tooltip as ChartTooltip } from 'recharts';
 import { motion, AnimatePresence } from 'framer-motion';
 
 function App() {
-  const { nodeId, connected, isGateway, forceOffline, setForceOffline, packets, broadcastSOS, triggerSync, blockchainLogs, hardReset } = useMesh();
+  const { nodeId, connected, isGateway, forceOffline, setForceOffline, packets, broadcastSOS, respondToSOS, removePacket, triggerSync, blockchainLogs, hardReset } = useMesh();
   const [payload, setPayload] = useState('');
   const [medicalUrgency, setMedicalUrgency] = useState(5);
-  const [syncing, setSyncing] = useState(false);
   const [selectedPacketId, setSelectedPacketId] = useState<string | null>(null);
+  const [isDarkMode, setIsDarkMode] = useState(true);
+  const [responseNotes, setResponseNotes] = useState('');
+  const [interfaceMode, setInterfaceMode] = useState<'VICTIM' | 'REVIEWER'>('VICTIM');
+
+  // Rescue Alert Logic
+  const [showRescueAlert, setShowRescueAlert] = useState<{msg: string, node: string} | null>(null);
+  const [lastDispatchedId, setLastDispatchedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (interfaceMode !== 'VICTIM') return;
+    const myPackets = packets.filter(p => p.sender === nodeId);
+    const dispatched = myPackets.find(p => p.response?.status === 'DISPATCHED' || p.response?.status === 'RESCUED');
+
+    if (dispatched && dispatched.id !== lastDispatchedId) {
+      setShowRescueAlert({msg: dispatched.response?.notes || "Help is on the way!", node: dispatched.response?.responderId.substring(0,8) || "Command"});
+      setLastDispatchedId(dispatched.id);
+      const timer = setTimeout(() => setShowRescueAlert(null), 10000);
+      return () => clearTimeout(timer);
+    }
+  }, [packets, nodeId, interfaceMode, lastDispatchedId]);
+
+  const stats = useMemo(() => {
+    const rescued = packets.filter(p => p.response?.status === 'RESCUED').length;
+    const dispatched = packets.filter(p => p.response?.status === 'DISPATCHED').length;
+    const pending = packets.filter(p => !p.response || p.response.status === 'PENDING').length;
+    const total = packets.length;
+    return { rescued, dispatched, pending, total };
+  }, [packets]);
 
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
     if (!payload.trim()) return;
-    // Generate a random relative coordinate for the CSS map
-    const x = Math.floor(Math.random() * 80) + 10;
-    const y = Math.floor(Math.random() * 80) + 10;
-    
+    const x = Math.floor(Math.random() * 70) + 15;
+    const y = Math.floor(Math.random() * 70) + 15;
     broadcastSOS(payload, medicalUrgency, {
       medicalUrgency,
       peopleAffected: Math.floor(Math.random() * 10) + 1,
@@ -27,179 +50,277 @@ function App() {
     setPayload('');
   };
 
+  const handleResponse = (status: 'DISPATCHED' | 'RESCUED') => {
+    if (!selectedPacketId) return;
+    respondToSOS(selectedPacketId, status, responseNotes);
+    setResponseNotes('');
+  };
+
+  const handleDelete = () => {
+    if (!selectedPacketId) return;
+    if (window.confirm("Permanent deletion of signal from mesh?")) {
+      removePacket(selectedPacketId);
+      setSelectedPacketId(null);
+    }
+  };
+
   const selectedPacket = useMemo(() => packets.find(p => p.id === selectedPacketId), [packets, selectedPacketId]);
-  const aiAnalysis = useMemo(() => selectedPacket ? calculatePriorityScore(selectedPacket) : null, [selectedPacket]);
+
+  const theme = {
+    bg: isDarkMode ? 'bg-slate-950' : 'bg-slate-50',
+    panel: isDarkMode ? 'bg-slate-900/60 backdrop-blur-xl border-slate-800' : 'bg-white/80 backdrop-blur-xl border-slate-200',
+    card: isDarkMode ? 'bg-slate-900/40 border-slate-800' : 'bg-white border-slate-200',
+    inner: isDarkMode ? 'bg-black/40 border-slate-800' : 'bg-slate-100/50 border-slate-200',
+    text: isDarkMode ? 'text-white' : 'text-slate-900',
+    textDim: isDarkMode ? 'text-slate-500' : 'text-slate-400',
+    accent: 'text-cyan-500',
+    grid: isDarkMode ? 'rgba(30, 41, 59, 0.2)' : 'rgba(203, 213, 225, 0.5)'
+  };
 
   return (
-    <div className="h-screen w-screen bg-[#020617] text-white flex overflow-hidden font-sans">
+    <div className={`h-screen w-screen ${theme.bg} ${theme.text} flex overflow-hidden font-sans transition-all duration-700`}>
       
-      {/* Left Panel: Tactical Map Fallback */}
-      <main className="flex-1 relative border-r border-slate-800 bg-[#0a0f1e] overflow-hidden">
-        {/* Grid Background */}
-        <div className="absolute inset-0 opacity-10" style={{ backgroundImage: 'radial-gradient(#1e293b 1px, transparent 1px)', backgroundSize: '40px 40px' }}></div>
-        
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-           <div className="text-center opacity-20">
-              <h2 className="text-6xl font-black tracking-tighter">TACTICAL GRID</h2>
-              <p className="text-sm font-mono tracking-[1em]">SUB-SPACE SCANNING</p>
-           </div>
-        </div>
-
-        {/* SOS Markers */}
-        {packets.map(p => (
+      {/* Premium Rescue Notification */}
+      <AnimatePresence>
+        {showRescueAlert && (interfaceMode === 'VICTIM') && (
           <motion.div 
-            key={p.id}
-            initial={{ scale: 0, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            onClick={() => setSelectedPacketId(p.id)}
-            style={{ top: `${p.location.lat}%`, left: `${p.location.lng}%` }}
-            className={`absolute w-6 h-6 -ml-3 -mt-3 rounded-full cursor-pointer z-20 group`}
+            initial={{ scale: 0.8, opacity: 0, y: -50 }}
+            animate={{ scale: 1, opacity: 1, y: 0 }}
+            exit={{ scale: 0.8, opacity: 0, y: -50 }}
+            className="absolute top-10 left-1/2 -translate-x-1/2 z-[100] w-full max-w-xl p-1 bg-gradient-to-r from-green-500 via-emerald-400 to-green-500 rounded-[2rem] shadow-[0_20px_50px_rgba(16,185,129,0.3)]"
           >
-            <div className={`absolute inset-0 rounded-full ${p.severity > 7 ? 'bg-red-500 shadow-[0_0_20px_#ef4444]' : 'bg-cyan-500 shadow-[0_0_20px_#06b6d4]'}`}></div>
-            <div className={`absolute inset-0 rounded-full animate-ping opacity-40 ${p.severity > 7 ? 'bg-red-500' : 'bg-cyan-500'}`}></div>
-            
-            <div className="absolute top-8 left-1/2 -translate-x-1/2 bg-black/80 border border-slate-700 px-2 py-1 rounded text-[8px] font-mono whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity">
-              SCORE: {calculatePriorityScore(p).score.toFixed(1)}
+            <div className="bg-slate-950 rounded-[1.8rem] p-8 flex items-center gap-8 relative overflow-hidden">
+               <div className="absolute top-0 right-0 p-8 opacity-5 text-6xl">📡</div>
+               <div className="w-20 h-20 bg-green-500 rounded-full flex items-center justify-center text-4xl animate-pulse shadow-[0_0_30px_rgba(16,185,129,0.5)]">🚑</div>
+               <div className="flex-1">
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-[10px] font-black uppercase tracking-[0.3em] text-green-400">Response Decrypted</span>
+                    <span className="text-[10px] font-mono text-slate-500">FROM: NODE_{showRescueAlert.node}</span>
+                  </div>
+                  <h3 className="text-2xl font-black tracking-tighter text-white mb-2">Help is Dispatched</h3>
+                  <p className="text-slate-300 font-medium text-base italic border-l-2 border-green-500 pl-4 py-1">"{showRescueAlert.msg}"</p>
+                  <div className="mt-6 flex items-center gap-3">
+                    <div className="h-1 flex-1 bg-slate-800 rounded-full overflow-hidden">
+                       <motion.div initial={{ x: '-100%' }} animate={{ x: '100%' }} transition={{ repeat: Infinity, duration: 2 }} className="h-full w-1/3 bg-green-500 shadow-[0_0_10px_#10b981]"></motion.div>
+                    </div>
+                    <span className="text-[9px] font-black uppercase text-green-500 animate-pulse">Mesh Link Active</span>
+                  </div>
+               </div>
             </div>
           </motion.div>
-        ))}
+        )}
+      </AnimatePresence>
 
-        {/* Status Overlays */}
-        <div className="absolute top-6 left-6 right-6 flex justify-between items-start pointer-events-none">
-          <div className="bg-black/80 backdrop-blur-xl border border-slate-700/50 p-6 rounded-3xl pointer-events-auto shadow-2xl">
-            <h1 className="text-3xl font-black tracking-tighter uppercase mb-1">Disaster<span className="text-cyan-400">Net</span></h1>
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-2">
-                <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'} animate-pulse`}></span>
-                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Mesh Node Active</span>
+      {/* Main Grid View */}
+      <main className={`flex-1 relative border-r ${isDarkMode ? 'border-slate-800' : 'border-slate-200'} overflow-hidden`}>
+        {/* Animated Tactical Grid */}
+        <div className="absolute inset-0 z-0 opacity-50" style={{ 
+          backgroundImage: `radial-gradient(circle, ${theme.grid} 1px, transparent 1px)`, 
+          backgroundSize: '50px 50px'
+        }}></div>
+        
+        {/* Mesh SOS Pings */}
+        <div className="absolute inset-0 z-10">
+          {packets.map(p => (
+            <motion.div 
+              key={p.id} initial={{ scale: 0 }} animate={{ scale: 1 }}
+              onClick={() => setSelectedPacketId(p.id)}
+              style={{ top: `${p.location.lat}%`, left: `${p.location.lng}%` }}
+              className="absolute w-12 h-12 -ml-6 -mt-6 cursor-pointer z-50 group flex items-center justify-center"
+            >
+              <div className={`absolute inset-0 rounded-full transition-all duration-500 ${
+                p.response?.status === 'RESCUED' ? 'bg-green-500 shadow-[0_0_30px_#22c55e]' : 
+                p.response?.status === 'DISPATCHED' ? 'bg-blue-500 shadow-[0_0_30px_#3b82f6]' :
+                p.severity > 7 ? 'bg-red-600 shadow-[0_0_30px_#dc2626]' : 'bg-cyan-500 shadow-[0_0_30px_#06b6d4]'
+              }`}></div>
+              <div className={`absolute inset-0 rounded-full animate-ping opacity-20 ${
+                p.response?.status === 'RESCUED' ? 'bg-green-500' : 
+                p.response?.status === 'DISPATCHED' ? 'bg-blue-500' : 'bg-white'
+              }`}></div>
+              <span className="relative z-10 text-[10px] font-black text-white drop-shadow-md">{p.path.length}h</span>
+            </motion.div>
+          ))}
+        </div>
+
+        {/* HUD Top Center */}
+        <div className="absolute top-8 left-8 right-8 flex justify-between items-start z-20 pointer-events-none">
+          <div className={`${theme.panel} p-6 rounded-[2rem] pointer-events-auto shadow-2xl border border-white/5`}>
+            <div className="flex items-center gap-6 mb-4">
+                <h1 className={`text-3xl font-black tracking-tighter uppercase ${theme.text}`}>Disaster<span className="text-cyan-500 italic">Net</span></h1>
+                <div className={`px-4 py-1.5 rounded-full border ${isDarkMode ? 'bg-cyan-500/10 border-cyan-500/30' : 'bg-cyan-50/50 border-cyan-100'}`}>
+                    <span className="text-[10px] font-black text-cyan-500 uppercase tracking-widest">{interfaceMode} INTERFACE</span>
+                </div>
+            </div>
+            
+            <div className="flex items-center gap-10">
+              <div className="flex flex-col">
+                <span className={`text-[9px] font-black uppercase tracking-widest ${theme.textDim} mb-1`}>Rescued Units</span>
+                <div className="flex items-end gap-2 leading-none">
+                   <span className="text-3xl font-black text-green-500">{stats.rescued}</span>
+                   <span className={`text-sm font-bold ${theme.textDim} pb-1`}>/ {stats.total}</span>
+                </div>
               </div>
-              <div className="w-[1px] h-3 bg-slate-700"></div>
-              <span className="text-[10px] font-mono text-cyan-400/80 uppercase">{nodeId ? `ID: ${nodeId.substring(0,8)}` : 'BOOTING...'}</span>
+              <div className={`w-[1px] h-10 ${isDarkMode ? 'bg-slate-800' : 'bg-slate-200'}`}></div>
+              <div className="flex flex-col">
+                <span className={`text-[9px] font-black uppercase tracking-widest ${theme.textDim} mb-1`}>Pending SOS</span>
+                <span className="text-3xl font-black text-red-500 leading-none">{stats.pending}</span>
+              </div>
             </div>
           </div>
 
-          <div className="flex flex-col gap-4 items-end">
-             <div className="bg-black/80 backdrop-blur-xl border border-slate-800 p-2 rounded-full pointer-events-auto flex items-center gap-4 px-6 shadow-2xl">
-                <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Manual Offline Mode</span>
-                <button onClick={() => setForceOffline(!forceOffline)} className={`w-10 h-5 rounded-full p-1 transition-all ${forceOffline ? 'bg-red-600' : 'bg-slate-700'}`}>
-                  <div className={`w-3 h-3 bg-white rounded-full transition-all ${forceOffline ? 'translate-x-5' : 'translate-x-0'}`}></div>
-                </button>
+          <div className="flex flex-col gap-4 items-end pointer-events-auto">
+             <div className={`${theme.panel} p-2 rounded-full flex gap-2 border border-white/5 shadow-xl`}>
+                 <button onClick={() => setInterfaceMode('VICTIM')} className={`px-6 py-3 rounded-full text-[10px] font-black uppercase transition-all ${interfaceMode === 'VICTIM' ? 'bg-cyan-500 text-white shadow-lg shadow-cyan-900/40' : theme.textDim}`}>Victim Mode</button>
+                 <button onClick={() => setInterfaceMode('REVIEWER')} className={`px-6 py-3 rounded-full text-[10px] font-black uppercase transition-all ${interfaceMode === 'REVIEWER' ? 'bg-red-500 text-white shadow-lg shadow-red-900/40' : theme.textDim}`}>Admin Hub</button>
              </div>
-             <div className={`bg-black/80 backdrop-blur-xl border p-4 rounded-2xl pointer-events-auto transition-all ${isGateway ? 'border-purple-500/50 shadow-purple-500/20' : 'border-slate-800 opacity-40'}`}>
-                <div className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">Network Gateway</div>
-                <div className={`text-sm font-black ${isGateway ? 'text-purple-400' : 'text-slate-500'}`}>{isGateway ? '🌐 STELLAR SYNC READY' : '📻 MESH (NO INTERNET)'}</div>
+             <div className="flex gap-4">
+                <button onClick={() => setIsDarkMode(!isDarkMode)} className={`${theme.panel} w-12 h-12 rounded-full flex items-center justify-center shadow-lg border border-white/5 text-xl`}>
+                  {isDarkMode ? '🌙' : '☀️'}
+                </button>
+                <div className={`${theme.panel} px-6 rounded-full flex items-center gap-4 border border-white/5 shadow-lg`}>
+                    <span className={`text-[9px] font-black uppercase tracking-widest ${theme.textDim}`}>Offline Isolation</span>
+                    <button onClick={() => setForceOffline(!forceOffline)} className={`w-12 h-6 rounded-full p-1 transition-all ${forceOffline ? 'bg-red-600' : 'bg-slate-700'}`}>
+                      <div className={`w-4 h-4 bg-white rounded-full transition-all ${forceOffline ? 'translate-x-6' : 'translate-x-0'}`}></div>
+                    </button>
+                </div>
              </div>
           </div>
         </div>
 
-        <button onClick={hardReset} className="absolute bottom-6 right-6 bg-black/40 hover:bg-red-900 border border-slate-800 text-[8px] font-black uppercase tracking-widest px-4 py-2 rounded-full pointer-events-auto transition-all opacity-30 hover:opacity-100">Hard Reset Demo</button>
-
-        <div className="absolute bottom-6 left-6 w-96 max-h-48 overflow-hidden pointer-events-auto">
-           <div className="bg-black/90 backdrop-blur-xl border border-slate-800 p-4 rounded-2xl flex flex-col h-full shadow-2xl">
-              <div className="text-[8px] font-black text-slate-500 uppercase tracking-widest mb-3 border-b border-slate-800 pb-2 flex justify-between items-center">
-                <span>Stellar Ledger Live Feed</span>
-                {isGateway && packets.some(p => !p.synced) && (
-                  <button onClick={async () => { setSyncing(true); await triggerSync(); setSyncing(false); }} className="text-purple-400 font-black animate-pulse uppercase px-2 bg-purple-400/10 rounded">Anchor to Ledger</button>
-                )}
+        {/* Ledger Terminal (Bottom Left) */}
+        <div className="absolute bottom-8 left-8 w-80 z-20 pointer-events-auto">
+           <div className={`${theme.panel} p-5 rounded-3xl shadow-2xl border border-white/5`}>
+              <div className={`text-[9px] font-black uppercase tracking-widest mb-4 flex justify-between ${theme.textDim}`}>
+                <span className="flex items-center gap-2"><span className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-ping"></span> Stellar Chain</span>
+                {isGateway && packets.some(p => !p.synced) && <span className="text-purple-400 font-bold">READY</span>}
               </div>
-              <div className="flex-1 overflow-y-auto space-y-2 font-mono text-[9px] text-slate-400 custom-scrollbar">
-                <AnimatePresence initial={false}>
-                  {blockchainLogs.map(log => (
-                    <motion.div initial={{ x: -20, opacity: 0 }} animate={{ x: 0, opacity: 1 }} key={log.id} className="flex gap-2 text-purple-400/80">
-                      <span className="text-slate-600">[{new Date(log.timestamp).toLocaleTimeString()}]</span>
-                      <span className="font-bold">TX_VERIFIED</span>
-                      <span className="text-slate-500 truncate">{log.hash}</span>
-                    </motion.div>
-                  ))}
-                </AnimatePresence>
-                {blockchainLogs.length === 0 && <div className="italic opacity-20 py-4">Waiting for gateway sync events...</div>}
+              <div className={`h-16 overflow-y-auto font-mono text-[10px] custom-scrollbar ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                {blockchainLogs.slice(0,3).map(log => (
+                  <div key={log.id} className="text-purple-400/80 mb-1">TX_SYNC_BLOCK_{log.hash.substring(0,8)}...</div>
+                ))}
+                {blockchainLogs.length === 0 && <div className="opacity-30 italic">Awaiting sync cycle...</div>}
               </div>
+              {isGateway && packets.some(p => !p.synced) && interfaceMode === 'REVIEWER' && (
+                <button onClick={triggerSync} className="w-full mt-4 bg-purple-600 hover:bg-purple-500 text-white text-[10px] font-black uppercase py-3 rounded-xl transition-all shadow-xl shadow-purple-900/20">Finalize Ledger Sync</button>
+              )}
            </div>
         </div>
+
+        <button onClick={hardReset} className="absolute bottom-8 right-8 text-slate-800 hover:text-red-500 text-[9px] font-black uppercase tracking-widest opacity-20 hover:opacity-100 transition-all pointer-events-auto">Wipe Demo Memory</button>
       </main>
 
-      {/* Right Panel: Command Center */}
-      <aside className="w-[450px] flex flex-col bg-slate-950 p-8 space-y-8 overflow-y-auto custom-scrollbar shadow-[-20px_0_50px_rgba(0,0,0,0.5)] z-10">
-        <section className="space-y-6">
-          <div className="flex justify-between items-end">
-            <h2 className="text-sm font-black uppercase tracking-[0.2em] text-red-500">Emergency Broadcast</h2>
-            <div className="text-[10px] font-bold text-slate-600">PROTOCOL v5.0</div>
-          </div>
-          <form onSubmit={handleSend} className="space-y-6 bg-slate-900/50 p-6 rounded-3xl border border-slate-800/50 shadow-inner">
-            <textarea className="w-full bg-black/60 border border-slate-800 p-4 rounded-2xl text-sm outline-none focus:border-red-500/50 transition-all resize-none shadow-inner" rows={2} value={payload} onChange={(e) => setPayload(e.target.value)} placeholder="Enter SOS Sit-Rep..." />
-            <div className="flex justify-between items-center px-1">
-              <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Medical Severity</span>
-              <span className="text-red-400 font-black text-xs">{medicalUrgency}/10</span>
-            </div>
-            <input type="range" min="1" max="10" value={medicalUrgency} onChange={(e) => setMedicalUrgency(Number(e.target.value))} className="w-full accent-red-500 h-1 bg-slate-800 rounded-lg appearance-none" />
-            <button className="w-full bg-red-600 hover:bg-red-500 py-4 rounded-2xl font-black text-xs uppercase tracking-[0.2em] transition-all shadow-xl shadow-red-900/40 disabled:opacity-20" disabled={!connected || !payload.trim()}>
-              Origin Message
-            </button>
-          </form>
-        </section>
+      {/* Side View: Dashboard Hub */}
+      <aside className={`w-[480px] ${theme.sidebar} p-10 flex flex-col space-y-10 z-30 transition-all duration-500 relative`}>
+        
+        {interfaceMode === 'VICTIM' ? (
+          <section className="flex flex-col h-full">
+            <header className="mb-10">
+               <span className="text-[10px] font-black uppercase tracking-[0.4em] text-cyan-500 mb-2 block">Emergency Beacon</span>
+               <h2 className="text-4xl font-black tracking-tighter">Broadcast SOS</h2>
+            </header>
 
-        <section className="flex-1 flex flex-col min-h-[400px]">
-          {selectedPacket && aiAnalysis ? (
-            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="flex-1 flex flex-col space-y-8 bg-slate-900/80 p-8 rounded-3xl border border-slate-800 shadow-2xl">
-               <div className="flex justify-between items-start">
-                  <h3 className="text-[10px] font-black text-cyan-400 uppercase tracking-[0.2em]">Priority Auditor</h3>
-                  <div className="text-center">
-                    <div className="text-5xl font-black text-white leading-none">{aiAnalysis.score.toFixed(1)}</div>
-                    <div className="text-[8px] font-black text-slate-500 uppercase tracking-widest mt-1">AI Rank</div>
+            <form onSubmit={handleSend} className={`space-y-10 ${theme.card} p-10 rounded-[2.5rem] border shadow-2xl relative overflow-hidden`}>
+               <div className="absolute top-0 right-0 w-32 h-32 bg-cyan-500/5 rounded-full -mr-16 -mt-16 blur-3xl"></div>
+               <div className="space-y-4">
+                  <label className={`text-[10px] font-black uppercase tracking-widest ${theme.textDim} ml-1`}>Incident Description</label>
+                  <textarea className={`w-full ${theme.inner} border p-6 rounded-3xl text-lg outline-none focus:border-cyan-500 transition-all resize-none ${theme.text} placeholder:opacity-30`} rows={4} value={payload} onChange={(e) => setPayload(e.target.value)} placeholder="Type your situation here..." />
+               </div>
+               
+               <div className="space-y-6">
+                  <div className="flex justify-between items-center text-[11px] font-black uppercase tracking-widest">
+                    <span className={theme.textDim}>Medical Urgency</span>
+                    <span className="text-cyan-500 text-2xl font-black">{medicalUrgency} <span className="text-[10px] opacity-30">/ 10</span></span>
                   </div>
+                  <input type="range" min="1" max="10" value={medicalUrgency} onChange={(e) => setMedicalUrgency(Number(e.target.value))} className="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer" />
                </div>
 
-               <div className="h-40">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={aiAnalysis.breakdown} layout="vertical" margin={{ left: -30 }}>
-                      <XAxis type="number" hide />
-                      <YAxis dataKey="name" type="category" hide />
-                      <Bar dataKey="value" radius={[0, 4, 4, 0]} barSize={20}>
-                        {aiAnalysis.breakdown.map((entry, index) => (
-                          <Cell key={index} fill={entry.color} />
-                        ))}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-               </div>
+               <button className="w-full bg-cyan-600 hover:bg-cyan-500 text-white py-8 rounded-3xl font-black text-lg uppercase tracking-[0.2em] transition-all shadow-[0_20px_50px_rgba(6,182,212,0.3)] disabled:opacity-30 disabled:shadow-none" disabled={!connected || !payload.trim()}>
+                 Broadcast To Mesh
+               </button>
+            </form>
 
-               <div className="space-y-3">
-                  {aiAnalysis.breakdown.map((item, i) => (
-                    <div key={i} className="flex justify-between items-center bg-black/40 p-3 rounded-xl border border-slate-800/50">
-                      <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">{item.name}</span>
-                      <span className="text-xs font-black text-slate-200">+{item.value.toFixed(1)}</span>
+            <div className="mt-auto space-y-6">
+               <div className="flex justify-between items-end border-b border-slate-800 pb-4">
+                  <h3 className={`text-[10px] font-black uppercase tracking-widest ${theme.textDim}`}>Active Transmissions</h3>
+                  <span className="text-[10px] font-mono opacity-30">AUTO-HOP ENABLED</span>
+               </div>
+               <div className="space-y-4 max-h-[30vh] overflow-y-auto pr-2 custom-scrollbar">
+                  {packets.filter(p => p.sender === nodeId).map(p => (
+                    <div key={p.id} className={`${theme.card} p-5 rounded-2xl border flex justify-between items-center group hover:border-cyan-500/50 transition-all`}>
+                       <div className="flex flex-col overflow-hidden mr-4">
+                           <span className="text-sm font-bold truncate">"{p.payload}"</span>
+                           <span className="text-[9px] font-mono opacity-30 uppercase mt-1">SENT: {new Date(p.timestamp).toLocaleTimeString()}</span>
+                       </div>
+                       <span className={`text-[10px] font-black px-4 py-2 rounded-full whitespace-nowrap shadow-sm ${
+                          p.response?.status === 'RESCUED' ? 'bg-green-500 text-white' :
+                          p.response?.status === 'DISPATCHED' ? 'bg-blue-500 text-white animate-pulse shadow-blue-500/30' : 'bg-slate-800 text-slate-500'
+                       }`}>{p.response?.status || 'RELAYING...'}</span>
                     </div>
                   ))}
+                  {packets.filter(p => p.sender === nodeId).length === 0 && <div className="text-center py-10 opacity-20 italic text-sm">No signals emitted yet.</div>}
                </div>
-
-               {aiAnalysis.isBiased && (
-                <div className="bg-red-500/10 border border-red-500/30 p-4 rounded-2xl flex items-center gap-3 border-l-4">
-                  <span className="text-xl">⚖️</span>
-                  <p className="text-[9px] text-red-400 font-bold leading-relaxed tracking-tight">{aiAnalysis.biasReasoning}</p>
-                </div>
-               )}
-
-               <div className="mt-auto pt-6 border-t border-slate-800">
-                  <div className="flex justify-between items-center mb-3">
-                    <span className="text-[9px] font-black text-slate-700 uppercase tracking-widest">Protocol Audit</span>
-                    <span className={`text-[8px] font-black uppercase px-2 py-0.5 rounded ${selectedPacket.synced ? 'bg-purple-500/20 text-purple-400' : 'bg-slate-800 text-slate-600'}`}>
-                      {selectedPacket.synced ? 'On Ledger' : 'Mesh Data'}
-                    </span>
-                  </div>
-                  <div className="bg-black/50 p-3 rounded-xl font-mono text-[8px] text-slate-600 break-all leading-relaxed shadow-inner">
-                    {selectedPacket.id}
-                  </div>
-               </div>
-            </motion.div>
-          ) : (
-            <div className="flex-1 border-2 border-dashed border-slate-900/50 rounded-3xl flex flex-col items-center justify-center text-slate-800 px-10 text-center">
-              <div className="text-5xl mb-6 grayscale opacity-10">⚖️</div>
-              <p className="text-[10px] font-black uppercase tracking-[0.2em] leading-relaxed opacity-40">
-                Select a tactical pulse to audit mission integrity
-              </p>
             </div>
-          )}
-        </section>
+          </section>
+        ) : (
+          <section className="flex flex-col h-full space-y-10">
+            <header>
+               <span className="text-[10px] font-black uppercase tracking-[0.4em] text-red-500 mb-2 block">Rescuer Command</span>
+               <h2 className="text-4xl font-black tracking-tighter">Mission Control</h2>
+            </header>
+
+            <div className="flex flex-col h-1/2 overflow-hidden">
+                <div className="flex justify-between items-end mb-6 border-b border-slate-800 pb-4">
+                    <h3 className={`text-[10px] font-black uppercase tracking-widest ${theme.textDim}`}>Incoming Feed</h3>
+                    <span className="text-[10px] font-black text-red-500 animate-pulse uppercase">Live Queue</span>
+                </div>
+                <div className="flex-1 overflow-y-auto space-y-4 pr-4 custom-scrollbar">
+                    {packets.sort((a,b) => b.timestamp - a.timestamp).map(p => (
+                    <div key={p.id} onClick={() => setSelectedPacketId(p.id)} className={`p-6 rounded-3xl border cursor-pointer transition-all ${selectedPacketId === p.id ? 'bg-slate-900 border-cyan-500 shadow-2xl scale-[1.02]' : theme.card + ' hover:border-slate-700'}`}>
+                        <div className="flex justify-between items-start mb-3">
+                        <span className={`text-[9px] font-black px-3 py-1 rounded-full ${p.response?.status === 'RESCUED' ? 'bg-green-500 text-white' : p.response?.status === 'DISPATCHED' ? 'bg-blue-500 text-white' : 'bg-red-500/10 text-red-500'}`}>{p.response?.status || 'UNREAD'}</span>
+                        <span className="text-[9px] font-mono opacity-30">{new Date(p.timestamp).toLocaleTimeString()}</span>
+                        </div>
+                        <p className={`text-sm font-bold truncate ${theme.text}`}>"{p.payload}"</p>
+                        <div className="flex gap-4 mt-3 opacity-30">
+                           <span className="text-[9px] font-black uppercase tracking-tighter">Hops: {p.path.length}</span>
+                           <span className="text-[9px] font-black uppercase tracking-tighter">Loc: {p.location.lat.toFixed(1)},{p.location.lng.toFixed(1)}</span>
+                        </div>
+                    </div>
+                    ))}
+                </div>
+            </div>
+
+            <div className="flex-1 flex flex-col border-t border-slate-800 pt-10 overflow-y-auto custom-scrollbar">
+                {selectedPacket ? (
+                    <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-8">
+                    <div className="flex justify-between items-center">
+                        <h3 className="text-[11px] font-black uppercase tracking-[0.2em] text-cyan-500">Case Intel</h3>
+                        <button onClick={handleDelete} className="text-[9px] font-black bg-red-600/10 hover:bg-red-600 text-red-600 hover:text-white px-5 py-2 rounded-full border border-red-600/20 transition-all uppercase tracking-widest">Delete Signal</button>
+                    </div>
+                    <div className={`${theme.inner} p-8 rounded-3xl border border-white/5`}>
+                        <p className={`text-lg font-bold leading-relaxed ${theme.text}`}>"{selectedPacket.payload}"</p>
+                    </div>
+                    <div className="space-y-6">
+                        <div className="flex justify-between items-center ml-1">
+                           <label className={`text-[10px] font-black uppercase tracking-widest ${theme.textDim}`}>Response Directives</label>
+                           <span className="text-[9px] font-mono opacity-30">ENCRYPTED RELAY</span>
+                        </div>
+                        <textarea className={`w-full ${theme.inner} border p-6 rounded-3xl text-sm outline-none focus:border-blue-500 transition-all resize-none ${theme.text} placeholder:opacity-30 shadow-inner`} rows={3} value={responseNotes} onChange={(e) => setResponseNotes(e.target.value)} placeholder="Send instructions back to victim..." />
+                        <div className="grid grid-cols-2 gap-6">
+                        <button onClick={() => handleResponse('DISPATCHED')} className="bg-blue-600 hover:bg-blue-500 text-white py-5 rounded-2xl font-black text-[11px] uppercase tracking-[0.2em] shadow-2xl shadow-blue-900/30">Confirm Team</button>
+                        <button onClick={() => handleResponse('RESCUED')} className="bg-green-600 hover:bg-green-500 text-white py-5 rounded-2xl font-black text-[11px] uppercase tracking-[0.2em] shadow-2xl shadow-green-900/30">Close Mission</button>
+                        </div>
+                    </div>
+                    </motion.div>
+                ) : (
+                    <div className="h-full flex flex-col items-center justify-center opacity-10 text-center px-10">
+                    <div className="text-6xl mb-6">🛡️</div>
+                    <p className="text-[11px] font-black uppercase tracking-[0.3em]">Select an incident to launch response</p>
+                    </div>
+                )}
+            </div>
+          </section>
+        )}
       </aside>
 
     </div>

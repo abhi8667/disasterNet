@@ -2,7 +2,7 @@ import React, { createContext, useContext, useEffect, useState, useRef } from 'r
 import { io, Socket } from 'socket.io-client';
 import { v4 as uuidv4 } from 'uuid';
 import { SOSPacket } from '../types';
-import { saveSOS, getAllSOS, initDB, resetLocalDatabase } from '../db';
+import { saveSOS, getAllSOS, initDB, resetLocalDatabase, deleteSOS as deleteFromDB } from '../db';
 import { syncToStellar } from '../blockchain';
 
 interface MeshContextType {
@@ -13,6 +13,8 @@ interface MeshContextType {
   setForceOffline: (val: boolean) => void;
   packets: SOSPacket[];
   broadcastSOS: (payload: string, severity: number, metadata: SOSPacket['metadata'], location: SOSPacket['location']) => void;
+  respondToSOS: (packetId: string, status: SOSPacket['response']['status'], notes: string) => void;
+  removePacket: (packetId: string) => void;
   triggerSync: () => Promise<void>;
   blockchainLogs: { id: string; hash: string; timestamp: number }[];
   hardReset: () => void;
@@ -72,7 +74,6 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setBlockchainLogs(prev => [{ id: uuidv4(), hash: txHash, timestamp: Date.now() }, ...prev]);
         const updatedAll = await db.getAll('messages');
         setPackets(updatedAll.sort((a, b) => b.timestamp - a.timestamp));
-        console.log(`[BLOCKCHAIN] Transaction Anchored: ${txHash}`);
       } catch (err) {
         console.error("[BLOCKCHAIN] Sync Failure.");
       }
@@ -88,24 +89,46 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   useEffect(() => {
-    // FIX: Detect the IP of the main PC automatically so Laptop B can connect
     const backendUrl = `http://${window.location.hostname}:3001`;
     const newSocket = io(backendUrl);
-    
     setSocket(newSocket);
     newSocket.on('connect', () => {
       setConnected(true);
       setNodeId(newSocket.id || uuidv4().substring(0, 8));
-      console.log(`[SYSTEM] Mesh Node Connected to ${backendUrl}`);
     });
+
     newSocket.on('mesh_receive', async (packet: SOSPacket) => {
-      if (receivedIds.current.has(packet.id)) return;
+      // Check if it's a deletion command (metadata could carry a 'deleted' flag in a real app, 
+      // but for this demo we'll just handle it by ID check or by broadcasting a special 'remove' event)
+      // For simplicity, we just handle the bi-directional updates.
+      
+      if (receivedIds.current.has(packet.id)) {
+        setPackets((prev) => {
+          const index = prev.findIndex(p => p.id === packet.id);
+          if (index !== -1) {
+            const updated = [...prev];
+            updated[index] = packet;
+            return updated;
+          }
+          return prev;
+        });
+        return;
+      }
+
       receivedIds.current.add(packet.id);
       await saveSOS(packet);
       const updatedPacket = { ...packet, path: [...packet.path, newSocket.id || 'unknown'] };
       setPackets((prev) => [updatedPacket, ...prev]);
       newSocket.emit('mesh_broadcast', updatedPacket);
     });
+
+    // Listen for a specific removal event
+    newSocket.on('mesh_remove', async (packetId: string) => {
+       await deleteFromDB(packetId);
+       setPackets(prev => prev.filter(p => p.id !== packetId));
+       receivedIds.current.delete(packetId);
+    });
+
     return () => { newSocket.close(); };
   }, []);
 
@@ -118,8 +141,31 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
     socket.emit('mesh_broadcast', newPacket);
   };
 
+  const respondToSOS = async (packetId: string, status: SOSPacket['response']['status'], notes: string) => {
+    if (!socket || !nodeId) return;
+    setPackets((prev) => {
+      const index = prev.findIndex(p => p.id === packetId);
+      if (index === -1) return prev;
+      const updatedPacket = { ...prev[index], response: { responderId: nodeId, status, notes, timestamp: Date.now() } };
+      saveSOS(updatedPacket);
+      socket.emit('mesh_broadcast', updatedPacket);
+      const newList = [...prev];
+      newList[index] = updatedPacket;
+      return newList;
+    });
+  };
+
+  const removePacket = async (packetId: string) => {
+    if (!socket) return;
+    await deleteFromDB(packetId);
+    setPackets(prev => prev.filter(p => p.id !== packetId));
+    receivedIds.current.delete(packetId);
+    // Broadcast the removal to other nodes
+    socket.emit('mesh_remove', packetId);
+  };
+
   return (
-    <MeshContext.Provider value={{ nodeId, connected, isGateway, forceOffline, setForceOffline, packets, broadcastSOS, triggerSync, blockchainLogs, hardReset }}>
+    <MeshContext.Provider value={{ nodeId, connected, isGateway, forceOffline, setForceOffline, packets, broadcastSOS, respondToSOS, removePacket, triggerSync, blockchainLogs, hardReset }}>
       {children}
     </MeshContext.Provider>
   );
