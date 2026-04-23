@@ -172,6 +172,13 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
       };
       setPackets((prev) => [updatedPacket, ...prev]);
       newSocket.emit('mesh_broadcast', updatedPacket);
+
+      // 5. AUTO-ACK (Ensure Victim gets 'Signal Anchored' popup)
+      // Only the first node that accepts it (or a node with better connectivity) 
+      // can trigger an initial ACK to let the victim know their signal is in the mesh.
+      if (!packet.response) {
+          respondToSOS(packet.id, 'ACK' as any, 'Signal integrated into Mesh.');
+      }
     });
 
     newSocket.on('mesh_remove', async (packetId: string) => {

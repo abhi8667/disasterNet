@@ -26,6 +26,8 @@ function App() {
   const [showRescueAlert, setShowRescueAlert] = useState<{msg: string, node: string} | null>(null);
   const [lastDispatchedId, setLastDispatchedId] = useState<string | null>(null);
   const [newSosAlert, setNewSosAlert] = useState<SOSPacket | null>(null);
+  const [showDispatchAlert, setShowDispatchAlert] = useState<boolean>(false);
+  const [showRescueSuccessAlert, setShowRescueSuccessAlert] = useState<boolean>(false);
 
   // Monitor for incoming SOS (Admin View)
   useEffect(() => {
@@ -245,6 +247,42 @@ function App() {
                   <h3 className="text-2xl font-black tracking-tighter text-white mb-2">Help is Dispatched</h3>
                   <p className="text-slate-300 font-medium text-base italic border-l-2 border-green-500 pl-4 py-1">"{showRescueAlert.msg}"</p>
                </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Admin: Mission Dispatched Alert */}
+      <AnimatePresence>
+        {showDispatchAlert && (interfaceMode === 'REVIEWER') && (
+          <motion.div 
+            initial={{ y: -100, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: -100, opacity: 0 }}
+            className="absolute top-10 left-1/2 -translate-x-1/2 z-[200] px-10 py-5 bg-blue-600 text-white rounded-3xl font-black shadow-[0_20px_50px_rgba(37,99,235,0.4)] flex items-center gap-4 border border-blue-400"
+          >
+            <span className="text-2xl">🚑</span>
+            <div className="flex flex-col">
+                <span className="text-[10px] uppercase tracking-widest opacity-70">Tactical Command</span>
+                <span className="text-sm">MISSION DISPATCHED TO MESH</span>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Admin: Rescue Success Alert */}
+      <AnimatePresence>
+        {showRescueSuccessAlert && (interfaceMode === 'REVIEWER') && (
+          <motion.div 
+            initial={{ scale: 0.5, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.5, opacity: 0 }}
+            className="absolute inset-0 z-[300] flex items-center justify-center pointer-events-none"
+          >
+            <div className="bg-emerald-600 text-white px-12 py-8 rounded-[3rem] font-black shadow-[0_30px_70px_rgba(16,185,129,0.5)] flex flex-col items-center gap-4 border-4 border-emerald-400">
+                <span className="text-6xl animate-bounce">🏆</span>
+                <span className="text-2xl uppercase tracking-tighter">Victim Marked Safe</span>
+                <span className="text-[10px] uppercase opacity-70">Mission Archive Updated</span>
             </div>
           </motion.div>
         )}
@@ -527,8 +565,8 @@ function App() {
                         </div>
                     </div>
                     <div className="flex gap-4">
-                        <button onClick={() => respondToSOS(selectedPacket.id, 'DISPATCHED', 'Rescue En Route')} className="flex-1 bg-blue-600 text-white py-5 rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl">Dispatch</button>
-                        <button onClick={() => respondToSOS(selectedPacket.id, 'RESCUED', 'Safe')} className="flex-1 bg-green-600 text-white py-5 rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl">Mark Safe</button>
+                        <button onClick={() => { respondToSOS(selectedPacket.id, 'DISPATCHED', 'Rescue En Route'); setShowDispatchAlert(true); setTimeout(() => setShowDispatchAlert(false), 3000); }} className="flex-1 bg-blue-600 text-white py-5 rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl">Dispatch</button>
+                        <button onClick={() => { respondToSOS(selectedPacket.id, 'RESCUED', 'Safe'); setShowRescueSuccessAlert(true); setTimeout(() => setShowRescueSuccessAlert(false), 3000); }} className="flex-1 bg-green-600 text-white py-5 rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl">Mark Safe</button>
                     </div>
                 </div>
             )}
