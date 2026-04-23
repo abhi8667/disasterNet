@@ -1,18 +1,26 @@
 import React, { createContext, useContext, useEffect, useState, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { v4 as uuidv4 } from 'uuid';
+import nacl from 'tweetnacl';
+import { decodeBase64, encodeBase64, decodeUTF8 } from 'tweetnacl-util';
+import { BloomFilter } from 'bloomfilter';
 import { SOSPacket } from '../types';
 import { saveSOS, getAllSOS, initDB, resetLocalDatabase, deleteSOS as deleteFromDB } from '../db';
 import { syncToStellar } from '../blockchain';
 
+// Bloom Filter for packet deduplication (prevents broadcast storms)
+const BF_SIZE = 32 * 1024; // 32KB
+const BF_HASHES = 16;
+
 interface MeshContextType {
   nodeId: string;
+  keyPair: nacl.SignKeyPair | null;
   connected: boolean;
   isGateway: boolean;
   forceOffline: boolean;
   setForceOffline: (val: boolean) => void;
   packets: SOSPacket[];
-  broadcastSOS: (payload: string, severity: number, metadata: SOSPacket['metadata'], location: SOSPacket['location']) => void;
+  broadcastSOS: (payload: string, severity: number, metadata: SOSPacket['metadata'], triage: SOSPacket['triage'], location: SOSPacket['location']) => void;
   respondToSOS: (packetId: string, status: SOSPacket['response']['status'], notes: string) => void;
   removePacket: (packetId: string) => void;
   triggerSync: () => Promise<void>;
@@ -25,17 +33,25 @@ const MeshContext = createContext<MeshContextType | undefined>(undefined);
 export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [socket, setSocket] = useState<Socket | null>(null);
   const [nodeId, setNodeId] = useState<string>('');
+  const [keyPair, setKeyPair] = useState<nacl.SignKeyPair | null>(null);
   const [connected, setConnected] = useState(false);
   const [isGateway, setIsGateway] = useState(false);
   const [forceOffline, setForceOffline] = useState(false);
   const [packets, setPackets] = useState<SOSPacket[]>([]);
   const [blockchainLogs, setBlockchainLogs] = useState<{ id: string; hash: string; timestamp: number }[]>([]);
-  const receivedIds = useRef<Set<string>>(new Set());
+  
+  // High-Efficiency Deduplication
+  const bloomFilter = useRef(new BloomFilter(BF_SIZE, BF_HASHES));
+  const seenIds = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    const checkOnline = () => {
-      setIsGateway(navigator.onLine && !forceOffline);
-    };
+    // Generate Cryptographic Identity
+    const kp = nacl.sign.keyPair();
+    setKeyPair(kp);
+  }, []);
+
+  useEffect(() => {
+    const checkOnline = () => setIsGateway(navigator.onLine && !forceOffline);
     window.addEventListener('online', checkOnline);
     window.addEventListener('offline', checkOnline);
     checkOnline();
@@ -50,7 +66,10 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const savedPackets = await getAllSOS();
       if (savedPackets.length > 0) {
         setPackets(savedPackets.sort((a, b) => b.timestamp - a.timestamp));
-        savedPackets.forEach(p => receivedIds.current.add(p.id));
+        savedPackets.forEach(p => {
+            seenIds.current.add(p.id);
+            bloomFilter.current.add(p.id);
+        });
       }
     };
     hydrate();
@@ -84,7 +103,8 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
     await resetLocalDatabase();
     setPackets([]);
     setBlockchainLogs([]);
-    receivedIds.current.clear();
+    seenIds.current.clear();
+    bloomFilter.current = new BloomFilter(BF_SIZE, BF_HASHES);
     window.location.reload();
   };
 
@@ -98,44 +118,99 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
 
     newSocket.on('mesh_receive', async (packet: SOSPacket) => {
-      // Check if it's a deletion command (metadata could carry a 'deleted' flag in a real app, 
-      // but for this demo we'll just handle it by ID check or by broadcasting a special 'remove' event)
-      // For simplicity, we just handle the bi-directional updates.
+      // 1. Bloom Filter Check (Deduplication)
+      const alreadySeen = bloomFilter.current.test(packet.id) && seenIds.current.has(packet.id);
       
-      if (receivedIds.current.has(packet.id)) {
-        setPackets((prev) => {
-          const index = prev.findIndex(p => p.id === packet.id);
-          if (index !== -1) {
-            const updated = [...prev];
-            updated[index] = packet;
-            return updated;
+      if (alreadySeen) {
+          // Check if this is a response update
+          if (packet.response) {
+            setPackets((prev) => {
+              const index = prev.findIndex(p => p.id === packet.id);
+              const existing = prev[index];
+              
+              // Only update and RELAY if the response is newer or missing
+              if (index !== -1 && (!existing.response || existing.response.timestamp < packet.response.timestamp)) {
+                const updated = [...prev];
+                updated[index] = packet;
+                // RELAY the update back to the mesh
+                newSocket.emit('mesh_broadcast', packet);
+                return updated;
+              }
+              return prev;
+            });
           }
-          return prev;
-        });
-        return;
+          return;
       }
 
-      receivedIds.current.add(packet.id);
+      // 2. Cryptographic Signature Verification
+      if (packet.signature && packet.publicKey) {
+          const messageUint8 = decodeUTF8(packet.payload + packet.timestamp + packet.sender);
+          const signatureUint8 = decodeBase64(packet.signature);
+          const pubKeyUint8 = decodeBase64(packet.publicKey);
+          const isValid = nacl.sign.detached.verify(messageUint8, signatureUint8, pubKeyUint8);
+          if (!isValid) {
+              console.warn("[SECURITY] Dropping unverified packet:", packet.id);
+              return;
+          }
+      }
+
+      // 3. TTL Check (Prevent infinite loops)
+      if (packet.ttl <= 0) {
+          console.warn("[MESH] TTL Expired for packet:", packet.id);
+          return;
+      }
+
+      // 4. Accept Packet
+      bloomFilter.current.add(packet.id);
+      seenIds.current.add(packet.id);
       await saveSOS(packet);
-      const updatedPacket = { ...packet, path: [...packet.path, newSocket.id || 'unknown'] };
+      
+      const updatedPacket = { 
+          ...packet, 
+          ttl: packet.ttl - 1, 
+          path: [...packet.path, newSocket.id || 'unknown'] 
+      };
       setPackets((prev) => [updatedPacket, ...prev]);
       newSocket.emit('mesh_broadcast', updatedPacket);
     });
 
-    // Listen for a specific removal event
     newSocket.on('mesh_remove', async (packetId: string) => {
        await deleteFromDB(packetId);
        setPackets(prev => prev.filter(p => p.id !== packetId));
-       receivedIds.current.delete(packetId);
+       seenIds.current.delete(packetId);
     });
 
     return () => { newSocket.close(); };
   }, []);
 
-  const broadcastSOS = async (payload: string, severity: number, metadata: SOSPacket['metadata'], location: SOSPacket['location']) => {
-    if (!socket || !nodeId) return;
-    const newPacket: SOSPacket = { id: uuidv4(), sender: nodeId, severity, timestamp: Date.now(), path: [nodeId], payload, synced: false, metadata, location };
-    receivedIds.current.add(newPacket.id);
+  const broadcastSOS = async (payload: string, severity: number, metadata: SOSPacket['metadata'], triage: SOSPacket['triage'], location: SOSPacket['location']) => {
+    if (!socket || !nodeId || !keyPair) return;
+    
+    const timestamp = Date.now();
+    // Sign the message
+    const messageUint8 = decodeUTF8(payload + timestamp + nodeId);
+    const signature = encodeBase64(nacl.sign.detached(messageUint8, keyPair.secretKey));
+    const publicKey = encodeBase64(keyPair.publicKey);
+
+    const newPacket: SOSPacket = { 
+        id: uuidv4(), 
+        sender: nodeId, 
+        originalSender: nodeId, // Set the original author
+        severity, 
+        timestamp, 
+        path: [nodeId], 
+        payload, 
+        synced: false, 
+        ttl: 10, // Max 10 hops
+        signature,
+        publicKey,
+        metadata,
+        triage,
+        location 
+    };
+
+    bloomFilter.current.add(newPacket.id);
+    seenIds.current.add(newPacket.id);
     await saveSOS(newPacket);
     setPackets((prev) => [newPacket, ...prev]);
     socket.emit('mesh_broadcast', newPacket);
@@ -146,9 +221,17 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setPackets((prev) => {
       const index = prev.findIndex(p => p.id === packetId);
       if (index === -1) return prev;
-      const updatedPacket = { ...prev[index], response: { responderId: nodeId, status, notes, timestamp: Date.now() } };
+      
+      const updatedPacket: SOSPacket = { 
+        ...prev[index], 
+        sender: nodeId, // Update sender to current node for relay
+        timestamp: Date.now(), // Update timestamp to treat as fresh mesh update
+        response: { responderId: nodeId, status, notes, timestamp: Date.now() } 
+      };
+      
       saveSOS(updatedPacket);
       socket.emit('mesh_broadcast', updatedPacket);
+      
       const newList = [...prev];
       newList[index] = updatedPacket;
       return newList;
@@ -159,13 +242,12 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!socket) return;
     await deleteFromDB(packetId);
     setPackets(prev => prev.filter(p => p.id !== packetId));
-    receivedIds.current.delete(packetId);
-    // Broadcast the removal to other nodes
+    seenIds.current.delete(packetId);
     socket.emit('mesh_remove', packetId);
   };
 
   return (
-    <MeshContext.Provider value={{ nodeId, connected, isGateway, forceOffline, setForceOffline, packets, broadcastSOS, respondToSOS, removePacket, triggerSync, blockchainLogs, hardReset }}>
+    <MeshContext.Provider value={{ nodeId, keyPair, connected, isGateway, forceOffline, setForceOffline, packets, broadcastSOS, respondToSOS, removePacket, triggerSync, blockchainLogs, hardReset }}>
       {children}
     </MeshContext.Provider>
   );

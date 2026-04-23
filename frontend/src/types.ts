@@ -1,11 +1,21 @@
 export interface SOSPacket {
   id: string;
   sender: string;
+  originalSender: string; // Add this to track the original author
   severity: number;
   timestamp: number;
   path: string[];
   payload: string;
   synced: boolean;
+  ttl: number;
+  signature?: string;
+  publicKey?: string;
+  triage: {
+    canWalk: boolean;
+    breathing: boolean;
+    isInjured: boolean;
+    tag: 'RED' | 'YELLOW' | 'GREEN' | 'BLACK'; // S.T.A.R.T. Triage Tag
+  };
   metadata: {
     medicalUrgency: number;
     peopleAffected: number;
@@ -16,7 +26,6 @@ export interface SOSPacket {
     lat: number;
     lng: number;
   };
-  // New: Field to store responder's feedback/status
   response?: {
     responderId: string;
     status: 'DISPATCHED' | 'RESCUED' | 'PENDING';
